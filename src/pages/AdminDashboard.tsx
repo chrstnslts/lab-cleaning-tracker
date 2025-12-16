@@ -19,7 +19,7 @@ type TaskRow = {
   id: number
   task_date: string
   room_name: string
-  cleaning_level: string        // 'L1' | 'L2' | 'L3'
+  cleaning_level: string // 'L1' | 'L2' | 'L3'
   cleaning_level_id: number
   is_harvest_shared: boolean
   assignees: AssignmentSummary[]
@@ -48,11 +48,49 @@ type WorkerSummaryRow = {
   rooms: string[]
 }
 
+type WeeklySummaryRow = {
+  user_id: string
+  full_name: string
+  total: number
+  perDay: {
+    [date: string]: {
+      count: number
+      rooms: string[]
+    }
+  }
+}
+
 interface Props {
   profile: Profile
 }
 
 const daysOfWeekLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+// helpers for week calculations
+const toISO = (d: Date): string => d.toISOString().slice(0, 10)
+
+const getWeekStart = (dateStr: string): string => {
+  const d = new Date(dateStr)
+  const day = d.getDay() // 0 = Sun
+  d.setDate(d.getDate() - day) // start on Sunday
+  return toISO(d)
+}
+
+const getWeekEnd = (weekStartStr: string): string => {
+  const d = new Date(weekStartStr)
+  d.setDate(d.getDate() + 6)
+  return toISO(d)
+}
+
+const getWeekDates = (weekStartStr: string): string[] => {
+  const d = new Date(weekStartStr)
+  const dates: string[] = []
+  for (let i = 0; i < 7; i++) {
+    dates.push(toISO(d))
+    d.setDate(d.getDate() + 1)
+  }
+  return dates
+}
 
 const AdminDashboard: React.FC<Props> = ({ profile }) => {
   const navigate = useNavigate()
@@ -69,6 +107,8 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
   const [message, setMessage] = useState<string | null>(null)
 
   const [workerSummary, setWorkerSummary] = useState<WorkerSummaryRow[]>([])
+  const [weeklySummary, setWeeklySummary] = useState<WeeklySummaryRow[]>([])
+  const [weeklyLoading, setWeeklyLoading] = useState(false)
 
   const logout = async () => {
     await supabase.auth.signOut()
@@ -92,12 +132,12 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
     setCleaningLevels(data || [])
   }
 
-  // ---------- BUILD WORKER SUMMARY FOR CURRENT TASKS ----------
+  // ---------- BUILD DAILY WORKER SUMMARY ----------
 
   const buildWorkerSummary = (taskRows: TaskRow[]) => {
     const map = new Map<string, WorkerSummaryRow>()
 
-    // start with all workers so even 0-task people show up
+    // start with all workers (so off workers still appear)
     workers.forEach(w => {
       map.set(w.user_id, {
         user_id: w.user_id,
@@ -107,7 +147,6 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
       })
     })
 
-    // add counts + rooms from assignments
     taskRows.forEach(task => {
       task.assignees.forEach(a => {
         const existing = map.get(a.user_id)
@@ -249,6 +288,7 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
 
     setMessage('Assignments generated!')
     await loadTasks(date)
+    await loadWeeklySummary(date)
   }
 
   // ---------- UPDATE CLEANING LEVEL FOR A TASK ----------
@@ -276,6 +316,93 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
       ),
     )
     setMessage('Cleaning level updated')
+  }
+
+  // ---------- WEEKLY ROTATION SUMMARY ----------
+
+  const loadWeeklySummary = async (anchorDate: string) => {
+    if (workers.length === 0) {
+      setWeeklySummary([])
+      return
+    }
+
+    setWeeklyLoading(true)
+
+    const weekStart = getWeekStart(anchorDate)
+    const weekEnd = getWeekEnd(weekStart)
+
+    const { data, error } = await supabase
+      .from('task_assignments')
+      .select(
+        `
+        id,
+        user_id,
+        tasks (
+          task_date,
+          rooms ( name )
+        )
+      `,
+      )
+      .gte('tasks.task_date', weekStart)
+      .lte('tasks.task_date', weekEnd)
+      .order('id', { ascending: true })
+
+    if (error) {
+      console.error(error)
+      setWeeklySummary([])
+      setWeeklyLoading(false)
+      return
+    }
+
+    const map = new Map<string, WeeklySummaryRow>()
+
+    // start with all workers so zero-load people appear
+    workers.forEach(w => {
+      map.set(w.user_id, {
+        user_id: w.user_id,
+        full_name: w.full_name || 'Worker',
+        total: 0,
+        perDay: {},
+      })
+    })
+
+    ;(data || []).forEach((row: any) => {
+      const userId = row.user_id as string
+      const taskDate = row.tasks?.task_date as string | undefined
+      const roomName = row.tasks?.rooms?.name as string | undefined
+      if (!taskDate) return
+
+      const summary =
+        map.get(userId) ||
+        (() => {
+          const created: WeeklySummaryRow = {
+            user_id: userId,
+            full_name: userId,
+            total: 0,
+            perDay: {},
+          }
+          map.set(userId, created)
+          return created
+        })()
+
+      summary.total += 1
+
+      if (!summary.perDay[taskDate]) {
+        summary.perDay[taskDate] = { count: 0, rooms: [] }
+      }
+
+      summary.perDay[taskDate].count += 1
+      if (roomName && !summary.perDay[taskDate].rooms.includes(roomName)) {
+        summary.perDay[taskDate].rooms.push(roomName)
+      }
+    })
+
+    const summaryArray = Array.from(map.values()).sort((a, b) =>
+      a.full_name.localeCompare(b.full_name),
+    )
+
+    setWeeklySummary(summaryArray)
+    setWeeklyLoading(false)
   }
 
   // ---------- WORKER AVAILABILITY (DAYS OFF) ----------
@@ -378,10 +505,15 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
       await loadCleaningLevels()
       await loadWorkersAvailability()
       await loadTasks(date)
+      await loadWeeklySummary(date)
     }
     init()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const weekStart = getWeekStart(date)
+  const weekEnd = getWeekEnd(weekStart)
+  const weekDates = getWeekDates(weekStart)
 
   // ---------- RENDER ----------
 
@@ -398,7 +530,7 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
       </header>
 
       {message && (
-        <div style={{ marginBottom: '0.75rem', color: '#ddd' }}>
+        <div style={{ marginBottom: '0.75rem', color: '#333', background: '#eef', padding: '6px' }}>
           {message}
         </div>
       )}
@@ -411,10 +543,11 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
           <input
             type="date"
             value={date}
-            onChange={e => {
+            onChange={async e => {
               const newDate = e.target.value
               setDate(newDate)
-              loadTasks(newDate)
+              await loadTasks(newDate)
+              await loadWeeklySummary(newDate)
             }}
           />
         </label>
@@ -442,8 +575,8 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
             <tbody>
               {tasks.map(t => (
                 <tr key={t.id}>
-                  <td style={{ borderBottom: '1px solid #333' }}>{t.room_name}</td>
-                  <td style={{ borderBottom: '1px solid #333' }}>
+                  <td style={{ borderBottom: '1px solid #ddd' }}>{t.room_name}</td>
+                  <td style={{ borderBottom: '1px solid #ddd' }}>
                     <select
                       value={t.cleaning_level}
                       onChange={e => updateTaskLevel(t.id, e.target.value)}
@@ -455,10 +588,10 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
                       ))}
                     </select>
                   </td>
-                  <td style={{ borderBottom: '1px solid #333' }}>
+                  <td style={{ borderBottom: '1px solid #ddd' }}>
                     {t.is_harvest_shared ? 'Yes' : 'No'}
                   </td>
-                  <td style={{ borderBottom: '1px solid #333' }}>
+                  <td style={{ borderBottom: '1px solid #ddd' }}>
                     {t.assignees.length === 0
                       ? '—'
                       : t.assignees.map(a => a.user_name).join(', ')}
@@ -470,7 +603,7 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
         )}
       </section>
 
-      {/* WORKER ROTATION / LOAD SUMMARY */}
+      {/* WORKER ASSIGNMENT SUMMARY FOR THE DAY */}
       <section style={{ marginBottom: '2rem' }}>
         <h3>Worker Assignment Summary (for {date})</h3>
         {workerSummary.length === 0 ? (
@@ -487,15 +620,98 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
             <tbody>
               {workerSummary.map(w => (
                 <tr key={w.user_id}>
-                  <td style={{ borderBottom: '1px solid #333' }}>{w.full_name}</td>
-                  <td style={{ borderBottom: '1px solid #333' }}>{w.task_count}</td>
-                  <td style={{ borderBottom: '1px solid #333' }}>
+                  <td style={{ borderBottom: '1px solid #ddd' }}>{w.full_name}</td>
+                  <td style={{ borderBottom: '1px solid #ddd' }}>{w.task_count}</td>
+                  <td style={{ borderBottom: '1px solid #ddd' }}>
                     {w.task_count === 0 ? '—' : w.rooms.join(', ')}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        )}
+      </section>
+
+      {/* WEEKLY ROTATION / LOAD VIEW */}
+      <section style={{ marginBottom: '2rem' }}>
+        <h3>
+          Weekly Worker Rotation (Week of {weekStart} to {weekEnd})
+        </h3>
+        {weeklyLoading && <div>Loading weekly summary…</div>}
+        {!weeklyLoading && weeklySummary.length === 0 && (
+          <div>No workers or no assignments in this week.</div>
+        )}
+        {!weeklyLoading && weeklySummary.length > 0 && (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '700px' }}>
+              <thead>
+                <tr>
+                  <th style={{ borderBottom: '1px solid #555', textAlign: 'left', padding: '4px' }}>
+                    Worker
+                  </th>
+                  {weekDates.map(d => {
+                    const dt = new Date(d)
+                    const label = dt.toLocaleDateString(undefined, {
+                      weekday: 'short',
+                      month: 'numeric',
+                      day: 'numeric',
+                    })
+                    return (
+                      <th
+                        key={d}
+                        style={{
+                          borderBottom: '1px solid #555',
+                          textAlign: 'center',
+                          padding: '4px',
+                        }}
+                      >
+                        {label}
+                      </th>
+                    )
+                  })}
+                  <th style={{ borderBottom: '1px solid #555', textAlign: 'center', padding: '4px' }}>
+                    Total
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {weeklySummary.map(w => (
+                  <tr key={w.user_id}>
+                    <td style={{ borderBottom: '1px solid #ddd', padding: '4px' }}>{w.full_name}</td>
+                    {weekDates.map(d => {
+                      const cell = w.perDay[d]
+                      const count = cell?.count ?? 0
+                      const rooms = cell?.rooms?.join(', ') ?? ''
+                      return (
+                        <td
+                          key={d}
+                          style={{
+                            borderBottom: '1px solid #ddd',
+                            textAlign: 'center',
+                            padding: '4px',
+                            backgroundColor: count >= 3 ? '#ffe0e0' : count === 0 ? '#f9f9f9' : '#eef5ff',
+                          }}
+                          title={rooms}
+                        >
+                          {count === 0 ? '' : count}
+                        </td>
+                      )
+                    })}
+                    <td
+                      style={{
+                        borderBottom: '1px solid #ddd',
+                        textAlign: 'center',
+                        padding: '4px',
+                        fontWeight: 'bold',
+                      }}
+                    >
+                      {w.total}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
@@ -528,14 +744,14 @@ const AdminDashboard: React.FC<Props> = ({ profile }) => {
               <tbody>
                 {workers.map(worker => (
                   <tr key={worker.user_id}>
-                    <td style={{ borderBottom: '1px solid #333', padding: '4px' }}>
+                    <td style={{ borderBottom: '1px solid #ddd', padding: '4px' }}>
                       {worker.full_name || worker.user_id}
                     </td>
                     {worker.availability.map(day => (
                       <td
                         key={day.weekday}
                         style={{
-                          borderBottom: '1px solid #333',
+                          borderBottom: '1px solid #ddd',
                           textAlign: 'center',
                           padding: '4px',
                         }}
