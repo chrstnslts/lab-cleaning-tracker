@@ -69,7 +69,9 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
   const [toast, setToast] = useState<string | null>(null);
 
   // Weekly rotation view state
-  const [rotationWeekStart, setRotationWeekStart] = useState<string>(() => toISODate(startOfWeekMonday(new Date())));
+  const [rotationWeekStart, setRotationWeekStart] = useState<string>(() =>
+    toISODate(startOfWeekMonday(new Date()))
+  );
   const rotationWeekEnd = useMemo(() => {
     const d = new Date(rotationWeekStart);
     const end = addDays(d, 6);
@@ -88,7 +90,11 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
     const [roomsRes, levelsRes, workersRes] = await Promise.all([
       supabase.from("rooms").select("id,name,is_harvest").eq("active", true).order("id"),
       supabase.from("cleaning_levels").select("id,name").order("id"),
-      supabase.from("profiles").select("user_id,full_name,role").eq("role", "worker").order("full_name", { ascending: true }),
+      supabase
+        .from("profiles")
+        .select("user_id,full_name,role")
+        .eq("role", "worker")
+        .order("full_name", { ascending: true }),
     ]);
 
     if (roomsRes.error) throw roomsRes.error;
@@ -101,7 +107,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
   }
 
   async function loadDaysOff() {
-    // worker_availability rows only exist for "off" days in our approach
     const res = await supabase.from("worker_availability").select("user_id,weekday,is_off");
     if (res.error) throw res.error;
 
@@ -115,7 +120,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
   }
 
   async function loadTasksForDate(date: string) {
-    // 1) tasks for date
     const tasksRes = await supabase
       .from("tasks")
       .select("id,task_date,room_id,cleaning_level_id,is_harvest_shift")
@@ -125,9 +129,8 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
     if (tasksRes.error) throw tasksRes.error;
 
     const baseTasks = (tasksRes.data ?? []) as TaskRow[];
-
-    // 2) assignments for those tasks
     const taskIds = baseTasks.map((t) => t.id);
+
     let assignments: { task_id: number; user_id: string }[] = [];
     if (taskIds.length > 0) {
       const assRes = await supabase.from("task_assignments").select("task_id,user_id").in("task_id", taskIds);
@@ -135,7 +138,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
       assignments = (assRes.data ?? []) as any;
     }
 
-    // 3) map user_id -> full_name
     const userIds = Array.from(new Set(assignments.map((a) => a.user_id)));
     let profileMap: Record<string, string> = {};
     if (userIds.length > 0) {
@@ -146,14 +148,12 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
       }
     }
 
-    // 4) maps
     const roomMap = new Map<number, Room>();
     rooms.forEach((r) => roomMap.set(r.id, r));
 
     const levelMap = new Map<number, CleaningLevel>();
     levels.forEach((l) => levelMap.set(l.id, l));
 
-    // 5) build display list
     const byTask: Record<number, string[]> = {};
     for (const a of assignments) {
       if (!byTask[a.task_id]) byTask[a.task_id] = [];
@@ -193,7 +193,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reload tasks whenever selectedDate changes OR once rooms/levels are loaded
   useEffect(() => {
     if (rooms.length === 0 || levels.length === 0) return;
     (async () => {
@@ -217,12 +216,11 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
   async function handleGenerateAssignments() {
     try {
       setLoading(true);
-      // Option 2 generator is the SQL function we created earlier:
-      // generate_daily_assignments(p_date date)
       const { error } = await supabase.rpc("generate_daily_assignments", { p_date: selectedDate });
       if (error) throw error;
 
       await loadTasksForDate(selectedDate);
+      await loadWeeklyRotation();
       setToast("Assignments generated");
     } catch (e: any) {
       console.error(e);
@@ -237,7 +235,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
       const { error } = await supabase.from("tasks").update({ cleaning_level_id: newLevelId }).eq("id", taskId);
       if (error) throw error;
 
-      // Update local state immediately
       setTasks((prev) =>
         prev.map((t) =>
           t.task_id === taskId
@@ -260,16 +257,11 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
     try {
       if (isOff) {
         const { error } = await supabase.from("worker_availability").upsert(
-          {
-            user_id: userId,
-            weekday,
-            is_off: true,
-          },
+          { user_id: userId, weekday, is_off: true },
           { onConflict: "user_id,weekday" }
         );
         if (error) throw error;
       } else {
-        // delete the row if turning "off" false
         const { error } = await supabase.from("worker_availability").delete().eq("user_id", userId).eq("weekday", weekday);
         if (error) throw error;
       }
@@ -292,14 +284,14 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
     }
   }
 
+  // Worker summary for selected day
   const workerSummary = useMemo(() => {
-    // Summary: worker -> count & rooms
     const map: Record<string, { count: number; rooms: string[] }> = {};
     for (const t of tasks) {
-      for (const n of t.assigned_to_names) {
-        if (!map[n]) map[n] = { count: 0, rooms: [] };
-        map[n].count += 1;
-        map[n].rooms.push(t.room_name);
+      for (const name of t.assigned_to_names) {
+        if (!map[name]) map[name] = { count: 0, rooms: [] };
+        map[name].count += 1;
+        map[name].rooms.push(t.room_name);
       }
     }
     return Object.entries(map)
@@ -309,8 +301,7 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
 
   const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-  // --- Weekly Worker Rotation data (simple view) ---
-  // We’ll compute the week’s dates and show which rooms each worker gets per day based on generated assignments.
+  // Weekly rotation rows
   const [rotationRows, setRotationRows] = useState<
     { date: string; worker: string; rooms: string[]; total: number }[]
   >([]);
@@ -324,7 +315,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
       const startStr = toISODate(start);
       const endStr = toISODate(end);
 
-      // Pull all assignments for the week
       const assRes = await supabase
         .from("task_assignments")
         .select(
@@ -344,7 +334,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
 
       const data = assRes.data ?? [];
 
-      // Build user map
       const userIds = Array.from(new Set(data.map((x: any) => x.user_id)));
       let profileMap: Record<string, string> = {};
       if (userIds.length) {
@@ -353,7 +342,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
         for (const p of pr.data ?? []) profileMap[p.user_id] = p.full_name ?? "Unknown";
       }
 
-      // Aggregate: date + worker -> rooms
       const bucket: Record<string, { date: string; worker: string; rooms: string[]; total: number }> = {};
       for (const row of data as any[]) {
         const date = row.task?.task_date;
@@ -382,8 +370,6 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
   }
 
   useEffect(() => {
-    // Always render section; load data when week changes
-    if (!rotationWeekStart) return;
     loadWeeklyRotation();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rotationWeekStart]);
@@ -409,6 +395,7 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
         </div>
       )}
 
+      {/* DAILY TASKS */}
       <h2 style={{ marginTop: 18 }}>Daily Tasks</h2>
 
       <div className="toolbar" style={{ marginBottom: 12 }}>
@@ -431,25 +418,28 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
         <strong>Tasks for {selectedDate}</strong>
       </div>
 
-      <div className="tableWrap">
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left" }}>
-              <th style={{ padding: "10px 8px" }}>Room</th>
-              <th style={{ padding: "10px 8px" }}>Level</th>
-              <th style={{ padding: "10px 8px" }}>Harvest?</th>
-              <th style={{ padding: "10px 8px" }}>Assigned To</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tasks.map((t) => (
-              <tr key={t.task_id} style={{ borderTop: "1px solid rgba(255,255,255,0.15)" }}>
-                <td style={{ padding: "10px 8px" }}>{t.room_name}</td>
-                <td style={{ padding: "10px 8px" }}>
+      {/* MOBILE: TASK CARDS */}
+      <div className="onlyMobile">
+        <div className="cards">
+          {tasks.map((t) => (
+            <div className="card" key={t.task_id}>
+              <div className="cardHeader">
+                <div className="cardTitle">{t.room_name}</div>
+                <span className="badge">{t.cleaning_level_name}</span>
+              </div>
+
+              <div className="cardMeta">
+                <div className="metaRow">
+                  <span className="metaLabel">Harvest</span>
+                  <span>{t.is_harvest_shift ? "Yes" : "No"}</span>
+                </div>
+
+                <div className="metaRow" style={{ alignItems: "center" }}>
+                  <span className="metaLabel">Level</span>
                   <select
                     value={t.cleaning_level_id}
                     onChange={(e) => updateTaskLevel(t.task_id, Number(e.target.value))}
-                    style={{ height: 36 }}
+                    style={{ height: 40 }}
                   >
                     {levels.map((lvl) => (
                       <option key={lvl.id} value={lvl.id}>
@@ -457,54 +447,135 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
                       </option>
                     ))}
                   </select>
-                </td>
-                <td style={{ padding: "10px 8px" }}>{t.is_harvest_shift ? "Yes" : "No"}</td>
-                <td style={{ padding: "10px 8px" }}>
-                  {t.assigned_to_names.length ? t.assigned_to_names.join(", ") : <span style={{ opacity: 0.7 }}>—</span>}
-                </td>
-              </tr>
-            ))}
-            {!tasks.length && (
-              <tr>
-                <td colSpan={4} style={{ padding: "12px 8px", opacity: 0.75 }}>
-                  No tasks found for this date. Click “Generate Assignments for Date”.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+                </div>
+
+                <div className="metaRow">
+                  <span className="metaLabel">Assigned</span>
+                  <span style={{ textAlign: "right" }}>
+                    {t.assigned_to_names.length ? t.assigned_to_names.join(", ") : "—"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {!tasks.length && (
+            <div className="card">
+              <div style={{ opacity: 0.8 }}>
+                No tasks found for this date. Tap “Generate Assignments for Date”.
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
+      {/* DESKTOP: TASK TABLE */}
+      <div className="onlyDesktop">
+        <div className="tableWrap">
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ textAlign: "left" }}>
+                <th style={{ padding: "10px 8px" }}>Room</th>
+                <th style={{ padding: "10px 8px" }}>Level</th>
+                <th style={{ padding: "10px 8px" }}>Harvest?</th>
+                <th style={{ padding: "10px 8px" }}>Assigned To</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tasks.map((t) => (
+                <tr key={t.task_id} style={{ borderTop: "1px solid rgba(255,255,255,0.15)" }}>
+                  <td style={{ padding: "10px 8px" }}>{t.room_name}</td>
+                  <td style={{ padding: "10px 8px" }}>
+                    <select
+                      value={t.cleaning_level_id}
+                      onChange={(e) => updateTaskLevel(t.task_id, Number(e.target.value))}
+                      style={{ height: 36 }}
+                    >
+                      {levels.map((lvl) => (
+                        <option key={lvl.id} value={lvl.id}>
+                          {lvl.name}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td style={{ padding: "10px 8px" }}>{t.is_harvest_shift ? "Yes" : "No"}</td>
+                  <td style={{ padding: "10px 8px" }}>
+                    {t.assigned_to_names.length ? t.assigned_to_names.join(", ") : <span style={{ opacity: 0.7 }}>—</span>}
+                  </td>
+                </tr>
+              ))}
+              {!tasks.length && (
+                <tr>
+                  <td colSpan={4} style={{ padding: "12px 8px", opacity: 0.75 }}>
+                    No tasks found for this date. Click “Generate Assignments for Date”.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* WORKER SUMMARY */}
       <h2 style={{ marginTop: 22 }}>Worker Assignment Summary (for {selectedDate})</h2>
 
-      <div className="tableWrap">
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left" }}>
-              <th style={{ padding: "10px 8px" }}>Worker</th>
-              <th style={{ padding: "10px 8px" }}># of Tasks</th>
-              <th style={{ padding: "10px 8px" }}>Rooms</th>
-            </tr>
-          </thead>
-          <tbody>
-            {workerSummary.map((w) => (
-              <tr key={w.name} style={{ borderTop: "1px solid rgba(255,255,255,0.15)" }}>
-                <td style={{ padding: "10px 8px" }}>{w.name}</td>
-                <td style={{ padding: "10px 8px" }}>{w.count}</td>
-                <td style={{ padding: "10px 8px" }}>{w.rooms.join(", ")}</td>
-              </tr>
-            ))}
-            {!workerSummary.length && (
-              <tr>
-                <td colSpan={3} style={{ padding: "12px 8px", opacity: 0.75 }}>
-                  No assignments yet for this date.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      {/* MOBILE: SUMMARY CARDS */}
+      <div className="onlyMobile">
+        <div className="cards">
+          {workerSummary.map((w) => (
+            <div className="card" key={w.name}>
+              <div className="cardHeader">
+                <div className="cardTitle">{w.name}</div>
+                <span className="badge">{w.count} tasks</span>
+              </div>
+              <div className="cardMeta">
+                <div className="metaRow">
+                  <span className="metaLabel">Rooms</span>
+                  <span style={{ textAlign: "right" }}>{w.rooms.join(", ")}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+          {!workerSummary.length && (
+            <div className="card">
+              <div style={{ opacity: 0.8 }}>No assignments yet for this date.</div>
+            </div>
+          )}
+        </div>
       </div>
 
+      {/* DESKTOP: SUMMARY TABLE */}
+      <div className="onlyDesktop">
+        <div className="tableWrap">
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ textAlign: "left" }}>
+                <th style={{ padding: "10px 8px" }}>Worker</th>
+                <th style={{ padding: "10px 8px" }}># of Tasks</th>
+                <th style={{ padding: "10px 8px" }}>Rooms</th>
+              </tr>
+            </thead>
+            <tbody>
+              {workerSummary.map((w) => (
+                <tr key={w.name} style={{ borderTop: "1px solid rgba(255,255,255,0.15)" }}>
+                  <td style={{ padding: "10px 8px" }}>{w.name}</td>
+                  <td style={{ padding: "10px 8px" }}>{w.count}</td>
+                  <td style={{ padding: "10px 8px" }}>{w.rooms.join(", ")}</td>
+                </tr>
+              ))}
+              {!workerSummary.length && (
+                <tr>
+                  <td colSpan={3} style={{ padding: "12px 8px", opacity: 0.75 }}>
+                    No assignments yet for this date.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* DAYS OFF (keep as scrollable table - works fine on mobile) */}
       <h2 style={{ marginTop: 22 }}>Worker Days Off</h2>
 
       <div className="tableWrap">
@@ -552,7 +623,7 @@ export default function AdminDashboard({ profile }: { profile: Profile }) {
         </table>
       </div>
 
-      {/* Weekly Worker Rotation */}
+      {/* WEEKLY ROTATION (keep as table; still mobile-friendly with scroll) */}
       <h2 style={{ marginTop: 28 }}>
         Weekly Worker Rotation (Week of {rotationWeekStart} to {rotationWeekEnd})
       </h2>
